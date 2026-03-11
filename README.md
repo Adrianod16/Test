@@ -1,30 +1,3 @@
-index=* host=test sourcetype="WinEventLog:Application" (EventCode=1000 OR EventID=1000) "splunk-winevtlog.exe"
-| stats max(_time) as crash_time
-| eval earliest=crash_time-600, latest=crash_time+600
-| map maxsearches=1 search="
-  search index=* host=test sourcetype=\"XmlWinEventLog\" source=\"XmlWinEventLog:Microsoft-Windows-Sysmon/Operational\"
-  earliest=$earliest$ latest=$latest$
-  (EventCode IN (1,5,7,10,11,12,13,14,22,23,25) OR EventID IN (1,5,7,10,11,12,13,14,22,23,25))
-  | eval EID=coalesce(EventCode, EventID)
-  | eval Image=coalesce(Image, ProcessImage, process_path, 'EventData.Image', 'EventData.ProcessName', 'EventData.ImagePath')
-  | eval ParentImage=coalesce(ParentImage, 'EventData.ParentImage')
-  | eval CommandLine=coalesce(CommandLine, 'EventData.CommandLine')
-  | eval TargetImage=coalesce(TargetImage, 'EventData.TargetImage')
-  | eval GrantedAccess=coalesce(GrantedAccess, 'EventData.GrantedAccess')
-  | eval sysmon_event=case(
-      EID=1,\"Process Create\",
-      EID=5,\"Process Terminate\",
-      EID=7,\"Image Load\",
-      EID=10,\"Process Access\",
-      EID=11,\"File Create\",
-      EID=12,\"Registry Create/Delete\",
-      EID=13,\"Registry Value Set\",
-      EID=14,\"Registry Key Rename\",
-      EID=22,\"DNS Query\",
-      EID=23,\"File Delete\",
-      EID=25,\"Process Tampering\",
-      1=1,\"Other\"
-    )
-  | table _time sysmon_event EID Image ParentImage CommandLine TargetImage GrantedAccess User
-  | sort _time
-"
+The issue occurs because Amazon GuardDuty findings ingested into Microsoft Sentinel through the Amazon Web Services S3 connector are stored as generic SecurityAlert records, where most of the useful fields (such as IP address, instance ID, or account ID) remain inside the ExtendedProperties JSON and are not automatically mapped to Sentinel entities. This is normal behavior for third-party alerts, as automatic entity mapping is typically only fully implemented for native Microsoft security products. As a result, the alerts appear in Sentinel and can be opened, but the Investigation graph and Evidence sections do not contain populated entities.
+
+To remediate this, you should create a custom Analytics Rule that queries the SecurityAlert table, parses the required values from ExtendedProperties, and then maps those extracted fields to entities (e.g., IP, Host, Account) using the rule’s Entity Mapping configuration, which will allow Sentinel to properly populate investigation entities and improve incident context.
