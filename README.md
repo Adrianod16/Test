@@ -1,3 +1,25 @@
-The issue occurs because Amazon GuardDuty findings ingested into Microsoft Sentinel through the Amazon Web Services S3 connector are stored as generic SecurityAlert records, where most of the useful fields (such as IP address, instance ID, or account ID) remain inside the ExtendedProperties JSON and are not automatically mapped to Sentinel entities. This is normal behavior for third-party alerts, as automatic entity mapping is typically only fully implemented for native Microsoft security products. As a result, the alerts appear in Sentinel and can be opened, but the Investigation graph and Evidence sections do not contain populated entities.
+$headers = @{
+    "Content-Type"  = "application/json"
+    "Authorization" = "Bearer $env:DEEPSEEK_API_KEY"
+}
 
-To remediate this, you should create a custom Analytics Rule that queries the SecurityAlert table, parses the required values from ExtendedProperties, and then maps those extracted fields to entities (e.g., IP, Host, Account) using the rule’s Entity Mapping configuration, which will allow Sentinel to properly populate investigation entities and improve incident context.
+$body = @{
+    model = "deepseek-chat"
+    messages = @(
+        @{
+            role    = "user"
+            content = "Reply with: OK"
+        }
+    )
+    stream = $false
+} | ConvertTo-Json -Depth 5
+
+$response = Invoke-RestMethod `
+    -Method Post `
+    -Uri "https://api.deepseek.com/chat/completions" `
+    -Headers $headers `
+    -Body $body
+
+$response
+
+sk-57704f86b9804494ae73f74531a69ca7
