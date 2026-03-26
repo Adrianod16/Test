@@ -19,7 +19,7 @@ DeviceProcessEvents
     ProcessCommandLine has "lmstudio", 2,
     ProcessCommandLine has "anythingllm", 2,
     ProcessCommandLine has "jan.ai", 2,
-    FileName in~ ("ollama.exe", "lmstudio.exe", "jan.exe", "anythingllm.exe"), 2,
+    tolower(FileName) in ("ollama.exe", "lmstudio.exe", "jan.exe", "anythingllm.exe"), 2,
     1
 )
 | project
@@ -27,11 +27,11 @@ DeviceProcessEvents
     TimeGenerated,
     DeviceName,
     AccountName,
-    FileName,
-    FolderPath,
+    ProcFileName = FileName,
+    ProcFolderPath = FolderPath,
     ProcessCommandLine,
-    InitiatingProcessFileName,
-    InitiatingProcessCommandLine,
+    ProcInitiatingProcessFileName = InitiatingProcessFileName,
+    ProcInitiatingProcessCommandLine = InitiatingProcessCommandLine,
     ProcRisk;
 
 let ModelFiles =
@@ -40,15 +40,17 @@ DeviceFileEvents
 | where
     FileName endswith ".gguf"
     or FileName endswith ".safetensors"
-    or FileName endswith ".bin"
-    or FolderPath has_any ("\\.ollama\\", "\\Ollama\\models\\", "\\LM Studio\\", "\\Jan\\")
+    or FolderPath contains ".ollama"
+    or FolderPath contains "Ollama\\models"
+    or FolderPath contains "LM Studio"
+    or FolderPath contains "\\Jan\\"
 | extend FileRisk = case(
     FileName endswith ".gguf", 3,
     FileName endswith ".safetensors", 3,
-    FolderPath has "\\.ollama\\", 3,
-    FolderPath has "\\Ollama\\models\\", 3,
-    FolderPath has "\\LM Studio\\", 2,
-    FolderPath has "\\Jan\\", 2,
+    FolderPath contains ".ollama", 3,
+    FolderPath contains "Ollama\\models", 3,
+    FolderPath contains "LM Studio", 2,
+    FolderPath contains "\\Jan\\", 2,
     1
 )
 | project
@@ -72,8 +74,8 @@ DeviceNetworkEvents
 | project
     DeviceId,
     NetTime = TimeGenerated,
-    InitiatingProcessFileName,
-    InitiatingProcessCommandLine,
+    NetInitiatingProcessFileName = InitiatingProcessFileName,
+    NetInitiatingProcessCommandLine = InitiatingProcessCommandLine,
     RemoteIP,
     RemotePort,
     NetRisk;
@@ -92,13 +94,15 @@ SuspiciousProc
     TimeGenerated,
     DeviceName,
     AccountName,
-    FileName,
-    FolderPath,
+    ProcFileName,
+    ProcFolderPath,
     ProcessCommandLine,
-    InitiatingProcessFileName,
-    InitiatingProcessCommandLine,
+    ProcInitiatingProcessFileName,
+    ProcInitiatingProcessCommandLine,
     ModelFileName,
     ModelFolderPath,
+    NetInitiatingProcessFileName,
+    NetInitiatingProcessCommandLine,
     RemoteIP,
     RemotePort,
     ProcRisk,
