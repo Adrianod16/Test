@@ -1,25 +1,15 @@
-$headers = @{
-    "Content-Type"  = "application/json"
-    "Authorization" = "Bearer $env:DEEPSEEK_API_KEY"
-}
-
-$body = @{
-    model = "deepseek-chat"
-    messages = @(
-        @{
-            role    = "user"
-            content = "Reply with: OK"
-        }
+DeviceProcessEvents
+| where Timestamp > ago(1h)
+| where 
+    (
+        ProcessCommandLine matches regex @"(ollama\s+(run|serve))"
+        or ProcessCommandLine matches regex @"(llama\.cpp|gguf)"
+        or ProcessCommandLine has_any ("lmstudio", "anythingllm", "jan.ai")
     )
-    stream = $false
-} | ConvertTo-Json -Depth 5
-
-$response = Invoke-RestMethod `
-    -Method Post `
-    -Uri "https://api.deepseek.com/chat/completions" `
-    -Headers $headers `
-    -Body $body
-
-$response
-
-sk-57704f86b9804494ae73f74531a69ca7
+| where not(ProcessCommandLine has_any ("visual studio", "msbuild", "azureml"))
+| extend RiskScore = case(
+    ProcessCommandLine has "ollama run", 3,
+    ProcessCommandLine has "gguf", 2,
+    1
+)
+| project Timestamp, DeviceName, AccountName, FileName, ProcessCommandLine, InitiatingProcessFileName, RiskScore
