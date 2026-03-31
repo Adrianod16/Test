@@ -35,3 +35,27 @@ DeviceFileEvents
     InitiatingProcessFileName,
     InitiatingProcessCommandLine,
     ReportId
+
+
+
+
+    index=* sourcetype=*sysmon* EventCode=11
+| eval target_file=lower(coalesce(TargetFilename, target_filename, FileName, file_path))
+| where like(target_file, "%\\.vscode\\extensions\\%")
+    OR like(target_file, "%\\.vscode-insiders\\extensions\\%")
+    OR like(target_file, "%\\.cursor\\extensions\\%")
+    OR like(target_file, "%\\jetbrains\\%")
+| where like(target_file, "%chatgpt%")
+    OR like(target_file, "%copilot%")
+    OR like(target_file, "%openai%")
+    OR like(target_file, "%claude%")
+    OR like(target_file, "%anthropic%")
+    OR like(target_file, "%gemini%")
+    OR like(target_file, "%continue%")
+    OR like(target_file, "%codeium%")
+    OR like(target_file, "%tabnine%")
+    OR like(target_file, "%cody%")
+| eval host_name=coalesce(host, Computer, ComputerName)
+| eval username=coalesce(User, user)
+| table _time host_name username Image TargetFilename ProcessGuid ProcessId
+| rename _time as Time, host_name as DeviceName, username as AccountName, Image as InitiatingProcess, TargetFilename as FolderPath
