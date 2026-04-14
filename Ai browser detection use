@@ -24,3 +24,13 @@ NetworkAI
 | where RiskScore > 10
 | project DeviceName, InitiatingProcessAccountName, NetCount, ExtCount, RiskScore
 | sort by RiskScore desc
+
+
+
+This detection identifies potential unauthorized use of artificial intelligence (AI) services through web browsers by correlating outbound network connections with local browser extension-related activity.
+The rule monitors browser-initiated network traffic (e.g., Google Chrome, Microsoft Edge) to known AI service providers such as OpenAI, Anthropic, DeepSeek, Google Gemini APIs, Microsoft Copilot, and Grammarly. It then correlates this activity with file system events associated with browser extensions to increase detection confidence.
+A risk score is calculated based on the volume of network connections and extension-related activity. Alerts are generated when this score exceeds a defined threshold, indicating a higher likelihood of unauthorized AI usage.
+This detection is particularly useful in environments where:
+AI tools are restricted or not officially approved
+Data exfiltration via AI platforms is a concern
+Browser-based AI usage is not centrally controlled
