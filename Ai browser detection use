@@ -1,0 +1,26 @@
+let timeframe = 1h;
+
+let NetworkAI =
+DeviceNetworkEvents
+| where TimeGenerated > ago(timeframe)
+| where InitiatingProcessFileName in~ ("chrome.exe", "msedge.exe")
+| where RemoteUrl has_any (
+    "openai.com","anthropic.com","x.ai","deepseek",
+    "generativelanguage.googleapis.com","grammarly.com","copilot.microsoft.com"
+)
+| summarize NetCount = count() by DeviceName, InitiatingProcessAccountName;
+
+let ExtensionsAI =
+DeviceFileEvents
+| where TimeGenerated > ago(timeframe)
+| where FolderPath has "Extensions"
+| where FileName has_any ("gemini","copilot","grammarly","openai","gpt","ai")
+| summarize ExtCount = count() by DeviceName, InitiatingProcessAccountName;
+
+NetworkAI
+| join kind=leftouter ExtensionsAI on DeviceName, InitiatingProcessAccountName
+| extend ExtCount = coalesce(ExtCount, 0)
+| extend RiskScore = NetCount * 2 + ExtCount
+| where RiskScore > 10
+| project DeviceName, InitiatingProcessAccountName, NetCount, ExtCount, RiskScore
+| sort by RiskScore desc
