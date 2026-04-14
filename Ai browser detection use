@@ -34,3 +34,34 @@ This detection is particularly useful in environments where:
 AI tools are restricted or not officially approved
 Data exfiltration via AI platforms is a concern
 Browser-based AI usage is not centrally controlled
+
+
+
+(
+index=sysmon EventCode=22
+(
+    QueryName="*openai.com*"
+    OR QueryName="*anthropic.com*"
+    OR QueryName="*claude.ai*"
+    OR QueryName="*x.ai*"
+    OR QueryName="*deepseek*"
+    OR QueryName="*generativelanguage.googleapis.com*"
+    OR QueryName="*copilot.microsoft.com*"
+    OR QueryName="*grammarly.com*"
+)
+)
+| eval isDNS=1
+| append
+[
+    search index=sysmon EventCode=1
+    (Image="*\\chrome.exe" OR Image="*\\msedge.exe")
+    (CommandLine="*copilot*" OR CommandLine="*gemini*" OR CommandLine="*ai*")
+    | eval isProc=1
+]
+| stats 
+    count(eval(isDNS=1)) as DNSCount
+    count(eval(isProc=1)) as ProcCount
+    by Computer, User
+| eval RiskScore = DNSCount*2 + ProcCount
+| where RiskScore > 10
+| sort -RiskScore
