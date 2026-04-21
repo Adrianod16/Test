@@ -1,0 +1,183 @@
+let timeframe = 1h;
+
+// === 1. Suspicious process execution related to tunneling / proxy / bypass ===
+let SuspiciousExecution =
+DeviceProcessEvents
+| where TimeGenerated > ago(timeframe)
+| where
+(
+    FileName in~ ("ssh.exe", "plink.exe", "putty.exe", "openvpn.exe", "openvpn-gui.exe", "wsl.exe", "curl.exe", "powershell.exe", "cmd.exe", "python.exe")
+    or ProcessCommandLine has_any (
+        "ssh -D", "ssh -L", "ssh -R",
+        "ProxyCommand", "DynamicForward", "LocalForward", "RemoteForward",
+        "openvpn", ".ovpn",
+        "tinyproxy", "squid", "3proxy",
+        "Invoke-WebRequest", "curl", "python -m http.server"
+    )
+)
+| extend ExecIndicator = case(
+    ProcessCommandLine has "ssh -D", "SSH Dynamic Port Forwarding",
+    ProcessCommandLine has "ssh -L", "SSH Local Port Forwarding",
+    ProcessCommandLine has "ssh -R", "SSH Remote Port Forwarding",
+    ProcessCommandLine has "openvpn" or ProcessCommandLine has ".ovpn", "VPN Client Execution",
+    ProcessCommandLine has_any ("tinyproxy", "squid", "3proxy"), "Proxy Tool Execution",
+    FileName =~ "plink.exe", "Plink Execution",
+    FileName =~ "putty.exe", "PuTTY Execution",
+    "Suspicious Execution"
+)
+| project
+    ExecTime = TimeGenerated,
+    DeviceId,
+    DeviceName,
+    AccountName,
+    InitiatingProcessAccountName,
+    FileName,
+    ProcessCommandLine,
+    FolderPath,
+    ExecIndicator;
+
+// === 2. SSH connectivity to external infrastructure ===
+let SuspiciousSSH =
+DeviceNetworkEvents
+| where TimeGenerated > ago(timeframe)
+| where RemotePort == 22
+| where ActionType in~ ("ConnectionSuccess", "Connected")
+| where isnotempty(RemoteIP)
+| summarize
+    SSHFirstSeen = min(TimeGenerated),
+    SSHLastSeen = max(TimeGenerated),
+    SSHConnections = count(),
+    SSHRemoteIPs = make_set(RemoteIP, 20),
+    SSHRemoteUrls = make_set(RemoteUrl, 20)
+by DeviceId, DeviceName, InitiatingProcessAccountName;
+
+// === 3. Proxy behavior to common proxy ports or localhost proxy chaining ===
+let ProxyTraffic =
+DeviceNetworkEvents
+| where TimeGenerated > ago(timeframe)
+| where
+(
+    RemotePort in (8080, 3128, 8888, 8118, 8000)
+    or LocalPort in (8080, 3128, 8888, 8118, 8000)
+)
+| summarize
+    ProxyFirstSeen = min(TimeGenerated),
+    ProxyLastSeen = max(TimeGenerated),
+    ProxyConnections = count(),
+    ProxyRemoteIPs = make_set(RemoteIP, 20),
+    ProxyRemoteUrls = make_set(RemoteUrl, 20)
+by DeviceId, DeviceName, InitiatingProcessAccountName;
+
+// === 4. Direct access to AI services often targeted for policy bypass ===
+let AIAccess =
+DeviceNetworkEvents
+| where TimeGenerated > ago(timeframe)
+| where RemoteUrl has_any (
+    "openai.com",
+    "chat.openai.com",
+    "api.openai.com",
+    "anthropic.com",
+    "claude.ai",
+    "x.ai",
+    "grok.com",
+    "deepseek.com",
+    "generativelanguage.googleapis.com",
+    "gemini.google.com",
+    "perplexity.ai",
+    "poe.com",
+    "huggingface.co"
+)
+| summarize
+    AIFirstSeen = min(TimeGenerated),
+    AILastSeen = max(TimeGenerated),
+    AIConnections = count(),
+    AIDomains = make_set(RemoteUrl, 30),
+    AIRemoteIPs = make_set(RemoteIP, 30)
+by DeviceId, DeviceName, InitiatingProcessAccountName;
+
+// === 5. Optional: browsers or utilities making AI connections ===
+let SuspiciousAIProcess =
+DeviceNetworkEvents
+| where TimeGenerated > ago(timeframe)
+| where RemoteUrl has_any (
+    "openai.com",
+    "chat.openai.com",
+    "api.openai.com",
+    "anthropic.com",
+    "claude.ai",
+    "x.ai",
+    "grok.com",
+    "deepseek.com",
+    "generativelanguage.googleapis.com",
+    "gemini.google.com",
+    "perplexity.ai",
+    "poe.com",
+    "huggingface.co"
+)
+| where InitiatingProcessFileName in~ (
+    "chrome.exe", "msedge.exe", "firefox.exe",
+    "ssh.exe", "plink.exe", "putty.exe",
+    "curl.exe", "powershell.exe", "python.exe", "wsl.exe"
+)
+| summarize
+    AIProcConnections = count(),
+    AIProcNames = make_set(InitiatingProcessFileName, 20)
+by DeviceId, DeviceName, InitiatingProcessAccountName;
+
+// === 6. Correlation ===
+SuspiciousExecution
+| summarize
+    ExecFirstSeen = min(ExecTime),
+    ExecLastSeen = max(ExecTime),
+    ExecCount = count(),
+    ExecIndicators = make_set(ExecIndicator, 20),
+    ExecutedFiles = make_set(FileName, 20),
+    CommandLines = make_set(ProcessCommandLine, 20)
+by DeviceId, DeviceName, AccountName, InitiatingProcessAccountName
+| join kind=inner SuspiciousSSH on DeviceId, DeviceName, InitiatingProcessAccountName
+| join kind=leftouter ProxyTraffic on DeviceId, DeviceName, InitiatingProcessAccountName
+| join kind=inner AIAccess on DeviceId, DeviceName, InitiatingProcessAccountName
+| join kind=leftouter SuspiciousAIProcess on DeviceId, DeviceName, InitiatingProcessAccountName
+| extend ProxyConnections = coalesce(ProxyConnections, 0)
+| extend AIProcConnections = coalesce(AIProcConnections, 0)
+| extend RiskScore =
+    (iff(ExecCount > 0, 25, 0)) +
+    (iff(SSHConnections > 0, 30, 0)) +
+    (iff(ProxyConnections > 0, 20, 0)) +
+    (iff(AIConnections > 0, 25, 0)) +
+    (iff(AIProcConnections > 0, 10, 0))
+| where RiskScore >= 70
+| extend AlertReason = case(
+    ProxyConnections > 0, "Suspicious execution + SSH + proxy + AI access",
+    "Suspicious execution + SSH + AI access"
+)
+| project
+    TimeGenerated = ExecFirstSeen,
+    DeviceId,
+    DeviceName,
+    AccountName,
+    InitiatingProcessAccountName,
+    AlertReason,
+    RiskScore,
+    ExecCount,
+    ExecIndicators,
+    ExecutedFiles,
+    CommandLines,
+    SSHConnections,
+    SSHRemoteIPs,
+    SSHRemoteUrls,
+    ProxyConnections,
+    ProxyRemoteIPs,
+    ProxyRemoteUrls,
+    AIConnections,
+    AIDomains,
+    AIRemoteIPs,
+    AIProcConnections,
+    AIProcNames,
+    ExecLastSeen,
+    SSHFirstSeen,
+    SSHLastSeen,
+    ProxyFirstSeen,
+    ProxyLastSeen,
+    AIFirstSeen,
+    AILastSeen
