@@ -1,0 +1,229 @@
+let timeframe = 1h;
+
+// =========================
+// 1. Suspicious process execution related to tunneling / proxy / bypass
+// =========================
+let SuspiciousExecution =
+DeviceProcessEvents
+| where TimeGenerated > ago(timeframe)
+| extend CommandLine = tostring(ProcessCommandLine)
+| where
+(
+    // Dedicated tunneling / VPN tools
+    (
+        FileName in~ ("ssh.exe", "plink.exe", "putty.exe", "openvpn.exe", "openvpn-gui.exe")
+        and
+        (
+            CommandLine has "ssh"
+            or CommandLine has "openvpn"
+            or CommandLine has ".ovpn"
+            or FileName in~ ("plink.exe", "putty.exe", "openvpn.exe", "openvpn-gui.exe")
+        )
+    )
+    or
+    // Generic utilities only when command line is suspicious
+    (
+        FileName in~ ("wsl.exe", "curl.exe", "powershell.exe", "cmd.exe", "python.exe")
+        and
+        (
+            (CommandLine has "ssh" and CommandLine has_any (" -D", " -L", " -R"))
+            or CommandLine has_any (
+                "ProxyCommand", "DynamicForward", "LocalForward", "RemoteForward",
+                "openvpn", ".ovpn",
+                "tinyproxy", "squid", "3proxy",
+                "chisel", "frp", "ligolo", "gost",
+                "python -m http.server"
+            )
+            or CommandLine matches regex @"ssh\s+-[DLR]"
+        )
+    )
+)
+| extend ExecIndicator = case(
+    CommandLine matches regex @"ssh\s+-D" or (CommandLine has "ssh" and CommandLine has " -D"), "SSH Dynamic Port Forwarding",
+    CommandLine matches regex @"ssh\s+-L" or (CommandLine has "ssh" and CommandLine has " -L"), "SSH Local Port Forwarding",
+    CommandLine matches regex @"ssh\s+-R" or (CommandLine has "ssh" and CommandLine has " -R"), "SSH Remote Port Forwarding",
+    CommandLine has "ProxyCommand", "SSH ProxyCommand Usage",
+    CommandLine has_any ("DynamicForward", "LocalForward", "RemoteForward"), "SSH Forwarding Directive Usage",
+    CommandLine has "openvpn" or CommandLine has ".ovpn", "VPN Client Execution",
+    CommandLine has_any ("tinyproxy", "squid", "3proxy"), "Proxy Tool Execution",
+    CommandLine has_any ("chisel", "frp", "ligolo", "gost"), "Tunneling Tool Execution",
+    FileName =~ "plink.exe", "Plink Execution",
+    FileName =~ "putty.exe", "PuTTY Execution",
+    FileName =~ "openvpn.exe" or FileName =~ "openvpn-gui.exe", "OpenVPN Execution",
+    "Suspicious Execution"
+)
+| project
+    ExecTime = TimeGenerated,
+    DeviceId,
+    DeviceName,
+    AccountName,
+    InitiatingProcessAccountName,
+    FileName,
+    ProcessCommandLine = CommandLine,
+    FolderPath,
+    ExecIndicator;
+
+// =========================
+// 2. SSH connectivity to external infrastructure
+// =========================
+let SuspiciousSSH =
+DeviceNetworkEvents
+| where TimeGenerated > ago(timeframe)
+| where RemotePort == 22
+| where ActionType in~ ("ConnectionSuccess", "Connected")
+| where isnotempty(RemoteIP)
+| where not(ipv4_is_private(RemoteIP))
+| summarize
+    SSHFirstSeen = min(TimeGenerated),
+    SSHLastSeen = max(TimeGenerated),
+    SSHConnections = count(),
+    SSHRemoteIPs = make_set(RemoteIP, 20),
+    SSHRemoteUrls = make_set(RemoteUrl, 20),
+    SSHInitiatingProcesses = make_set(InitiatingProcessFileName, 20)
+by DeviceId, DeviceName, InitiatingProcessAccountName;
+
+// =========================
+// 3. Proxy behavior to common proxy ports
+// =========================
+let ProxyTraffic =
+DeviceNetworkEvents
+| where TimeGenerated > ago(timeframe)
+| where
+(
+    RemotePort in (8080, 3128, 8888, 8118, 8000, 1080)
+    or LocalPort in (8080, 3128, 8888, 8118, 8000, 1080)
+)
+| summarize
+    ProxyFirstSeen = min(TimeGenerated),
+    ProxyLastSeen = max(TimeGenerated),
+    ProxyConnections = count(),
+    ProxyRemoteIPs = make_set(RemoteIP, 20),
+    ProxyRemoteUrls = make_set(RemoteUrl, 20),
+    ProxyInitiatingProcesses = make_set(InitiatingProcessFileName, 20)
+by DeviceId, DeviceName, InitiatingProcessAccountName;
+
+// =========================
+// 4. Access to AI services commonly targeted for policy bypass
+// =========================
+let AIAccess =
+DeviceNetworkEvents
+| where TimeGenerated > ago(timeframe)
+| where RemoteUrl has_any (
+    "openai.com",
+    "chat.openai.com",
+    "api.openai.com",
+    "anthropic.com",
+    "claude.ai",
+    "x.ai",
+    "grok.com",
+    "deepseek.com",
+    "generativelanguage.googleapis.com",
+    "gemini.google.com",
+    "perplexity.ai",
+    "poe.com",
+    "huggingface.co"
+)
+| summarize
+    AIFirstSeen = min(TimeGenerated),
+    AILastSeen = max(TimeGenerated),
+    AIConnections = count(),
+    AIDomains = make_set(RemoteUrl, 30),
+    AIRemoteIPs = make_set(RemoteIP, 30),
+    AIInitiatingProcesses = make_set(InitiatingProcessFileName, 20)
+by DeviceId, DeviceName, InitiatingProcessAccountName;
+
+// =========================
+// 5. Suspicious processes making AI connections
+// =========================
+let SuspiciousAIProcess =
+DeviceNetworkEvents
+| where TimeGenerated > ago(timeframe)
+| where RemoteUrl has_any (
+    "openai.com",
+    "chat.openai.com",
+    "api.openai.com",
+    "anthropic.com",
+    "claude.ai",
+    "x.ai",
+    "grok.com",
+    "deepseek.com",
+    "generativelanguage.googleapis.com",
+    "gemini.google.com",
+    "perplexity.ai",
+    "poe.com",
+    "huggingface.co"
+)
+| where InitiatingProcessFileName in~ (
+    "ssh.exe", "plink.exe", "putty.exe",
+    "curl.exe", "powershell.exe", "python.exe", "wsl.exe",
+    "openvpn.exe", "openvpn-gui.exe"
+)
+| summarize
+    AIProcConnections = count(),
+    AIProcNames = make_set(InitiatingProcessFileName, 20)
+by DeviceId, DeviceName, InitiatingProcessAccountName;
+
+// =========================
+// 6. Correlation
+// =========================
+SuspiciousExecution
+| summarize
+    ExecFirstSeen = min(ExecTime),
+    ExecLastSeen = max(ExecTime),
+    ExecCount = count(),
+    ExecIndicators = make_set(ExecIndicator, 20),
+    ExecutedFiles = make_set(FileName, 20),
+    CommandLines = make_set(ProcessCommandLine, 20)
+by DeviceId, DeviceName, AccountName, InitiatingProcessAccountName
+| join kind=inner SuspiciousSSH on DeviceId, DeviceName, InitiatingProcessAccountName
+| join kind=leftouter ProxyTraffic on DeviceId, DeviceName, InitiatingProcessAccountName
+| join kind=inner AIAccess on DeviceId, DeviceName, InitiatingProcessAccountName
+| join kind=leftouter SuspiciousAIProcess on DeviceId, DeviceName, InitiatingProcessAccountName
+| extend ProxyConnections = coalesce(ProxyConnections, 0)
+| extend AIProcConnections = coalesce(AIProcConnections, 0)
+| extend RiskScore =
+    (iff(ExecCount > 0, 25, 0)) +
+    (iff(SSHConnections > 0, 30, 0)) +
+    (iff(ProxyConnections > 0, 15, 0)) +
+    (iff(AIConnections > 0, 25, 0)) +
+    (iff(AIProcConnections > 0, 15, 0))
+| where RiskScore >= 70
+| extend AlertReason = case(
+    ProxyConnections > 0 and AIProcConnections > 0, "Suspicious execution + SSH + proxy behavior + AI access from suspicious process",
+    ProxyConnections > 0, "Suspicious execution + SSH + proxy behavior + AI access",
+    AIProcConnections > 0, "Suspicious execution + SSH + AI access from suspicious process",
+    "Suspicious execution + SSH + AI access"
+)
+| project
+    TimeGenerated = ExecFirstSeen,
+    DeviceId,
+    DeviceName,
+    AccountName,
+    InitiatingProcessAccountName,
+    AlertReason,
+    RiskScore,
+    ExecCount,
+    ExecIndicators,
+    ExecutedFiles,
+    CommandLines,
+    SSHConnections,
+    SSHRemoteIPs,
+    SSHRemoteUrls,
+    SSHInitiatingProcesses,
+    ProxyConnections,
+    ProxyRemoteIPs,
+    ProxyRemoteUrls,
+    ProxyInitiatingProcesses,
+    AIConnections,
+    AIDomains,
+    AIRemoteIPs,
+    AIInitiatingProcesses,
+    AIProcConnections,
+    AIProcNames,
+    ExecLastSeen,
+    SSHFirstSeen,
+    SSHLastSeen,
+    ProxyFirstSeen,
+    ProxyLastSeen,
+    AIFirstSeen,
+    AILastSeen
