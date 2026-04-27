@@ -1,0 +1,158 @@
+| multisearch
+
+    [
+    search index=sysmon sourcetype="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=1 earliest=-1h
+    | eval process_lc=lower(Image)
+    | eval cmd_lc=lower(CommandLine)
+    | where
+        (
+            match(process_lc, "\\\\(ssh|plink|putty|openvpn|openvpn-gui)\.exe$")
+            OR
+            (
+                match(process_lc, "\\\\(wsl|curl|powershell|cmd|python)\.exe$")
+                AND
+                (
+                    like(cmd_lc, "%ssh -d%")
+                    OR like(cmd_lc, "%ssh -l%")
+                    OR like(cmd_lc, "%ssh -r%")
+                    OR like(cmd_lc, "%proxycommand%")
+                    OR like(cmd_lc, "%dynamicforward%")
+                    OR like(cmd_lc, "%localforward%")
+                    OR like(cmd_lc, "%remoteforward%")
+                    OR like(cmd_lc, "%openvpn%")
+                    OR like(cmd_lc, "%.ovpn%")
+                    OR like(cmd_lc, "%tinyproxy%")
+                    OR like(cmd_lc, "%squid%")
+                    OR like(cmd_lc, "%3proxy%")
+                    OR like(cmd_lc, "%chisel%")
+                    OR like(cmd_lc, "%frp%")
+                    OR like(cmd_lc, "%ligolo%")
+                    OR like(cmd_lc, "%gost%")
+                    OR like(cmd_lc, "%python -m http.server%")
+                )
+            )
+        )
+    | eval DetectionType="SuspiciousExecution"
+    | eval User=coalesce(User, AccountName)
+    | eval DeviceName=coalesce(host, Computer, ComputerName)
+    | eval ExecIndicator=case(
+        like(cmd_lc, "%ssh -d%"), "SSH Dynamic Port Forwarding",
+        like(cmd_lc, "%ssh -l%"), "SSH Local Port Forwarding",
+        like(cmd_lc, "%ssh -r%"), "SSH Remote Port Forwarding",
+        like(cmd_lc, "%proxycommand%"), "SSH ProxyCommand Usage",
+        like(cmd_lc, "%dynamicforward%") OR like(cmd_lc, "%localforward%") OR like(cmd_lc, "%remoteforward%"), "SSH Forwarding Directive Usage",
+        like(cmd_lc, "%openvpn%") OR like(cmd_lc, "%.ovpn%"), "VPN Client Execution",
+        like(cmd_lc, "%tinyproxy%") OR like(cmd_lc, "%squid%") OR like(cmd_lc, "%3proxy%"), "Proxy Tool Execution",
+        like(cmd_lc, "%chisel%") OR like(cmd_lc, "%frp%") OR like(cmd_lc, "%ligolo%") OR like(cmd_lc, "%gost%"), "Tunneling Tool Execution",
+        like(process_lc, "%\\plink.exe"), "Plink Execution",
+        like(process_lc, "%\\putty.exe"), "PuTTY Execution",
+        true(), "Suspicious Execution"
+    )
+    | table _time DetectionType DeviceName User Image CommandLine ParentImage ExecIndicator
+    ]
+
+    [
+    search index=zscaler earliest=-1h
+    | eval url_lc=lower(coalesce(url, request, cs_uri, dest_url, url_domain, hostname))
+    | eval dest_port=coalesce(dest_port, dport, server_port, dst_port)
+    | eval dest_ip=coalesce(dest_ip, dst_ip, server_ip)
+    | eval User=coalesce(user, username, src_user, login)
+    | eval DeviceName=coalesce(hostname, devicehostname, src_host, host)
+    | where dest_port=22
+    | eval DetectionType="SSHNetwork"
+    | table _time DetectionType DeviceName User dest_ip dest_port url_lc action
+    ]
+
+    [
+    search index=zscaler earliest=-1h
+    | eval url_lc=lower(coalesce(url, request, cs_uri, dest_url, url_domain, hostname))
+    | eval dest_port=coalesce(dest_port, dport, server_port, dst_port)
+    | eval src_port=coalesce(src_port, sport, client_port)
+    | eval dest_ip=coalesce(dest_ip, dst_ip, server_ip)
+    | eval User=coalesce(user, username, src_user, login)
+    | eval DeviceName=coalesce(hostname, devicehostname, src_host, host)
+    | where dest_port IN (8080,3128,8888,8118,8000,1080)
+        OR src_port IN (8080,3128,8888,8118,8000,1080)
+    | eval DetectionType="ProxyTraffic"
+    | table _time DetectionType DeviceName User dest_ip dest_port src_port url_lc action
+    ]
+
+    [
+    search index=zscaler earliest=-1h
+    | eval url_lc=lower(coalesce(url, request, cs_uri, dest_url, url_domain, hostname))
+    | eval dest_ip=coalesce(dest_ip, dst_ip, server_ip)
+    | eval User=coalesce(user, username, src_user, login)
+    | eval DeviceName=coalesce(hostname, devicehostname, src_host, host)
+    | where
+        like(url_lc, "%openai.com%")
+        OR like(url_lc, "%chat.openai.com%")
+        OR like(url_lc, "%api.openai.com%")
+        OR like(url_lc, "%anthropic.com%")
+        OR like(url_lc, "%claude.ai%")
+        OR like(url_lc, "%x.ai%")
+        OR like(url_lc, "%grok.com%")
+        OR like(url_lc, "%deepseek.com%")
+        OR like(url_lc, "%generativelanguage.googleapis.com%")
+        OR like(url_lc, "%gemini.google.com%")
+        OR like(url_lc, "%perplexity.ai%")
+        OR like(url_lc, "%poe.com%")
+        OR like(url_lc, "%huggingface.co%")
+    | eval DetectionType="AIAccess"
+    | table _time DetectionType DeviceName User dest_ip url_lc action
+    ]
+
+| stats
+    min(_time) as FirstSeen
+    max(_time) as LastSeen
+    count(eval(DetectionType="SuspiciousExecution")) as ExecCount
+    count(eval(DetectionType="SSHNetwork")) as SSHConnections
+    count(eval(DetectionType="ProxyTraffic")) as ProxyConnections
+    count(eval(DetectionType="AIAccess")) as AIConnections
+    values(ExecIndicator) as ExecIndicators
+    values(Image) as ExecutedFiles
+    values(CommandLine) as CommandLines
+    values(ParentImage) as ParentImages
+    values(dest_ip) as RemoteIPs
+    values(dest_port) as RemotePorts
+    values(url_lc) as Domains
+    values(action) as ZscalerActions
+by DeviceName User
+
+| eval RiskScore =
+    if(ExecCount>0,25,0)
+    + if(SSHConnections>0,30,0)
+    + if(ProxyConnections>0,15,0)
+    + if(AIConnections>0,25,0)
+
+| where RiskScore >= 70
+
+| eval AlertReason=case(
+    ExecCount>0 AND SSHConnections>0 AND ProxyConnections>0 AND AIConnections>0,
+        "Suspicious execution + SSH + proxy behavior + AI access",
+    ExecCount>0 AND SSHConnections>0 AND AIConnections>0,
+        "Suspicious execution + SSH + AI access",
+    true(),
+        "Potential AI policy bypass using tunneling or proxy behavior"
+)
+
+| convert ctime(FirstSeen) ctime(LastSeen)
+
+| table
+    FirstSeen
+    LastSeen
+    DeviceName
+    User
+    AlertReason
+    RiskScore
+    ExecCount
+    SSHConnections
+    ProxyConnections
+    AIConnections
+    ExecIndicators
+    ExecutedFiles
+    CommandLines
+    ParentImages
+    RemoteIPs
+    RemotePorts
+    Domains
+    ZscalerActions
