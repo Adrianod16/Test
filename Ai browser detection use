@@ -1,93 +1,30 @@
-(
-    index=zscaler sourcetype=*zscaler*web* earliest=-1h
-    (
-        url="*openai.com*"
-        OR url="*chat.openai.com*"
-        OR url="*api.openai.com*"
-        OR url="*claude.ai*"
-        OR url="*anthropic.com*"
-        OR url="*gemini.google.com*"
-        OR url="*generativelanguage.googleapis.com*"
-        OR url="*copilot.microsoft.com*"
-        OR url="*grammarly.com*"
-        OR url="*deepseek*"
-        OR url="*perplexity.ai*"
-        OR url="*poe.com*"
-    )
-    | eval signal="AI_Web_Access"
-    | eval norm_user=lower(coalesce(user, username, cs_username, login))
-    | eval norm_device=lower(coalesce(src_host, devicehostname, hostname, host))
-    | eval ai_url=url
-    | eval ai_service=case(
-        like(url,"%openai.com%"), "OpenAI",
-        like(url,"%claude.ai%") OR like(url,"%anthropic.com%"), "Anthropic Claude",
-        like(url,"%gemini.google.com%") OR like(url,"%generativelanguage.googleapis.com%"), "Google Gemini",
-        like(url,"%copilot.microsoft.com%"), "Microsoft Copilot",
-        like(url,"%grammarly.com%"), "Grammarly",
-        like(url,"%deepseek%"), "DeepSeek",
-        like(url,"%perplexity.ai%"), "Perplexity",
-        like(url,"%poe.com%"), "Poe",
-        true(), "Other AI"
-    )
-    | table _time signal norm_user norm_device ai_url ai_service action user_agent src_ip
+let timeframe = 30d;
+DeviceFileEvents
+| where TimeGenerated > ago(timeframe)
+| where FolderPath has @"\Extensions\"
+| where FolderPath has_any (
+    @"\Google\Chrome\User Data\",
+    @"\Microsoft\Edge\User Data\",
+    @"\BraveSoftware\Brave-Browser\User Data\"
 )
-| append
-[
-    search index=sysmon sourcetype="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational" earliest=-1h EventCode=11
-    | eval file_path=lower(coalesce(TargetFilename, targetfilename))
-    | where (
-        like(file_path, "%\\google\\chrome\\user data\\%\\extensions\\%")
-        OR like(file_path, "%\\microsoft\\edge\\user data\\%\\extensions\\%")
-        OR like(file_path, "%\\brave-browser\\user data\\%\\extensions\\%")
-    )
-    | eval signal="Browser_Extension_File_Activity"
-    | eval norm_user=lower(coalesce(User, user))
-    | eval norm_device=lower(coalesce(Computer, host))
-    | table _time signal norm_user norm_device file_path Image
-]
-| append
-[
-    search index=sysmon sourcetype="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational" earliest=-1h EventCode=1
-    | eval proc_image=lower(coalesce(Image, image))
-    | eval proc_cmd=lower(coalesce(CommandLine, commandline))
-    | where (
-        like(proc_image, "%\\chrome.exe")
-        OR like(proc_image, "%\\msedge.exe")
-        OR like(proc_image, "%\\brave.exe")
-    )
-    | where (
-        like(proc_cmd, "%--load-extension%")
-        OR like(proc_cmd, "%--disable-extensions-except%")
-        OR like(proc_cmd, "%chrome-extension://%")
-        OR like(proc_cmd, "%extension%")
-        OR like(proc_cmd, "%grammarly%")
-        OR like(proc_cmd, "%copilot%")
-        OR like(proc_cmd, "%gemini%")
-        OR like(proc_cmd, "%openai%")
-        OR like(proc_cmd, "%gpt%")
-    )
-    | eval signal="Browser_Extension_Process_Context"
-    | eval norm_user=lower(coalesce(User, user))
-    | eval norm_device=lower(coalesce(Computer, host))
-    | table _time signal norm_user norm_device proc_image proc_cmd ParentImage
-]
-| stats
-    min(_time) as FirstSeen
-    max(_time) as LastSeen
-    count(eval(signal="AI_Web_Access")) as AIWebEvents
-    count(eval(signal="Browser_Extension_File_Activity")) as ExtensionFileEvents
-    count(eval(signal="Browser_Extension_Process_Context")) as ExtensionProcessEvents
-    values(ai_service) as AIServices
-    values(ai_url) as AIUrls
-    values(action) as ZscalerActions
-    values(user_agent) as UserAgents
-    values(file_path) as ExtensionPaths
-    values(proc_cmd) as BrowserCommandLines
-    values(src_ip) as SourceIPs
-    by norm_user norm_device
-| where AIWebEvents > 0 AND (ExtensionFileEvents > 0 OR ExtensionProcessEvents > 0)
-| eval RiskScore = (AIWebEvents * 3) + (ExtensionFileEvents * 2) + ExtensionProcessEvents
-| where RiskScore > 10
-| convert ctime(FirstSeen) ctime(LastSeen)
-| rename norm_user as User norm_device as Device
-| sort - RiskScore
+| extend Browser = case(
+    FolderPath has @"\Google\Chrome\User Data\", "Google Chrome",
+    FolderPath has @"\Microsoft\Edge\User Data\", "Microsoft Edge",
+    FolderPath has @"\BraveSoftware\Brave-Browser\User Data\", "Brave",
+    "Unknown"
+)
+| extend ExtensionId = extract(@"\\Extensions\\([a-z]{32})\\", 1, FolderPath)
+| extend ExtensionVersion = extract(@"\\Extensions\\[a-z]{32}\\([^\\]+)\\", 1, FolderPath)
+| extend BrowserProfile = extract(@"\\User Data\\([^\\]+)\\Extensions\\", 1, FolderPath)
+| where isnotempty(ExtensionId)
+| summarize
+    FirstSeen=min(TimeGenerated),
+    LastSeen=max(TimeGenerated),
+    FileEvents=count(),
+    ExamplePath=any(FolderPath),
+    Devices=make_set(DeviceName),
+    Accounts=make_set(InitiatingProcessAccountName),
+    Versions=make_set(ExtensionVersion),
+    Profiles=make_set(BrowserProfile)
+    by Browser, ExtensionId
+| sort by LastSeen desc
