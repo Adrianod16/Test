@@ -1,67 +1,93 @@
-let timeframe = 1h;
-
-let NetworkAI =
-DeviceNetworkEvents
-| where TimeGenerated > ago(timeframe)
-| where InitiatingProcessFileName in~ ("chrome.exe", "msedge.exe")
-| where RemoteUrl has_any (
-    "openai.com","anthropic.com","x.ai","deepseek",
-    "generativelanguage.googleapis.com","grammarly.com","copilot.microsoft.com"
-)
-| summarize NetCount = count() by DeviceName, InitiatingProcessAccountName;
-
-let ExtensionsAI =
-DeviceFileEvents
-| where TimeGenerated > ago(timeframe)
-| where FolderPath has "Extensions"
-| where FileName has_any ("gemini","copilot","grammarly","openai","gpt","ai")
-| summarize ExtCount = count() by DeviceName, InitiatingProcessAccountName;
-
-NetworkAI
-| join kind=leftouter ExtensionsAI on DeviceName, InitiatingProcessAccountName
-| extend ExtCount = coalesce(ExtCount, 0)
-| extend RiskScore = NetCount * 2 + ExtCount
-| where RiskScore > 10
-| project DeviceName, InitiatingProcessAccountName, NetCount, ExtCount, RiskScore
-| sort by RiskScore desc
-
-
-
-This detection identifies potential unauthorized use of artificial intelligence (AI) services through web browsers by correlating outbound network connections with local browser extension-related activity.
-The rule monitors browser-initiated network traffic (e.g., Google Chrome, Microsoft Edge) to known AI service providers such as OpenAI, Anthropic, DeepSeek, Google Gemini APIs, Microsoft Copilot, and Grammarly. It then correlates this activity with file system events associated with browser extensions to increase detection confidence.
-A risk score is calculated based on the volume of network connections and extension-related activity. Alerts are generated when this score exceeds a defined threshold, indicating a higher likelihood of unauthorized AI usage.
-This detection is particularly useful in environments where:
-AI tools are restricted or not officially approved
-Data exfiltration via AI platforms is a concern
-Browser-based AI usage is not centrally controlled
-
-
-
 (
-index=sysmon EventCode=22
-(
-    QueryName="*openai.com*"
-    OR QueryName="*anthropic.com*"
-    OR QueryName="*claude.ai*"
-    OR QueryName="*x.ai*"
-    OR QueryName="*deepseek*"
-    OR QueryName="*generativelanguage.googleapis.com*"
-    OR QueryName="*copilot.microsoft.com*"
-    OR QueryName="*grammarly.com*"
+    index=zscaler sourcetype=*zscaler*web* earliest=-1h
+    (
+        url="*openai.com*"
+        OR url="*chat.openai.com*"
+        OR url="*api.openai.com*"
+        OR url="*claude.ai*"
+        OR url="*anthropic.com*"
+        OR url="*gemini.google.com*"
+        OR url="*generativelanguage.googleapis.com*"
+        OR url="*copilot.microsoft.com*"
+        OR url="*grammarly.com*"
+        OR url="*deepseek*"
+        OR url="*perplexity.ai*"
+        OR url="*poe.com*"
+    )
+    | eval signal="AI_Web_Access"
+    | eval norm_user=lower(coalesce(user, username, cs_username, login))
+    | eval norm_device=lower(coalesce(src_host, devicehostname, hostname, host))
+    | eval ai_url=url
+    | eval ai_service=case(
+        like(url,"%openai.com%"), "OpenAI",
+        like(url,"%claude.ai%") OR like(url,"%anthropic.com%"), "Anthropic Claude",
+        like(url,"%gemini.google.com%") OR like(url,"%generativelanguage.googleapis.com%"), "Google Gemini",
+        like(url,"%copilot.microsoft.com%"), "Microsoft Copilot",
+        like(url,"%grammarly.com%"), "Grammarly",
+        like(url,"%deepseek%"), "DeepSeek",
+        like(url,"%perplexity.ai%"), "Perplexity",
+        like(url,"%poe.com%"), "Poe",
+        true(), "Other AI"
+    )
+    | table _time signal norm_user norm_device ai_url ai_service action user_agent src_ip
 )
-)
-| eval isDNS=1
 | append
 [
-    search index=sysmon EventCode=1
-    (Image="*\\chrome.exe" OR Image="*\\msedge.exe")
-    (CommandLine="*copilot*" OR CommandLine="*gemini*" OR CommandLine="*ai*")
-    | eval isProc=1
+    search index=sysmon sourcetype="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational" earliest=-1h EventCode=11
+    | eval file_path=lower(coalesce(TargetFilename, targetfilename))
+    | where (
+        like(file_path, "%\\google\\chrome\\user data\\%\\extensions\\%")
+        OR like(file_path, "%\\microsoft\\edge\\user data\\%\\extensions\\%")
+        OR like(file_path, "%\\brave-browser\\user data\\%\\extensions\\%")
+    )
+    | eval signal="Browser_Extension_File_Activity"
+    | eval norm_user=lower(coalesce(User, user))
+    | eval norm_device=lower(coalesce(Computer, host))
+    | table _time signal norm_user norm_device file_path Image
 ]
-| stats 
-    count(eval(isDNS=1)) as DNSCount
-    count(eval(isProc=1)) as ProcCount
-    by Computer, User
-| eval RiskScore = DNSCount*2 + ProcCount
+| append
+[
+    search index=sysmon sourcetype="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational" earliest=-1h EventCode=1
+    | eval proc_image=lower(coalesce(Image, image))
+    | eval proc_cmd=lower(coalesce(CommandLine, commandline))
+    | where (
+        like(proc_image, "%\\chrome.exe")
+        OR like(proc_image, "%\\msedge.exe")
+        OR like(proc_image, "%\\brave.exe")
+    )
+    | where (
+        like(proc_cmd, "%--load-extension%")
+        OR like(proc_cmd, "%--disable-extensions-except%")
+        OR like(proc_cmd, "%chrome-extension://%")
+        OR like(proc_cmd, "%extension%")
+        OR like(proc_cmd, "%grammarly%")
+        OR like(proc_cmd, "%copilot%")
+        OR like(proc_cmd, "%gemini%")
+        OR like(proc_cmd, "%openai%")
+        OR like(proc_cmd, "%gpt%")
+    )
+    | eval signal="Browser_Extension_Process_Context"
+    | eval norm_user=lower(coalesce(User, user))
+    | eval norm_device=lower(coalesce(Computer, host))
+    | table _time signal norm_user norm_device proc_image proc_cmd ParentImage
+]
+| stats
+    min(_time) as FirstSeen
+    max(_time) as LastSeen
+    count(eval(signal="AI_Web_Access")) as AIWebEvents
+    count(eval(signal="Browser_Extension_File_Activity")) as ExtensionFileEvents
+    count(eval(signal="Browser_Extension_Process_Context")) as ExtensionProcessEvents
+    values(ai_service) as AIServices
+    values(ai_url) as AIUrls
+    values(action) as ZscalerActions
+    values(user_agent) as UserAgents
+    values(file_path) as ExtensionPaths
+    values(proc_cmd) as BrowserCommandLines
+    values(src_ip) as SourceIPs
+    by norm_user norm_device
+| where AIWebEvents > 0 AND (ExtensionFileEvents > 0 OR ExtensionProcessEvents > 0)
+| eval RiskScore = (AIWebEvents * 3) + (ExtensionFileEvents * 2) + ExtensionProcessEvents
 | where RiskScore > 10
-| sort -RiskScore
+| convert ctime(FirstSeen) ctime(LastSeen)
+| rename norm_user as User norm_device as Device
+| sort - RiskScore
