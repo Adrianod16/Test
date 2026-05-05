@@ -1,0 +1,105 @@
+// === SSH process execution ===
+let SSH_Process =
+DeviceProcessEvents
+| where TimeGenerated > ago(timeframe)
+| where FileName in~ ("ssh.exe", "plink.exe", "putty.exe", "scp.exe", "sftp.exe")
+   or ProcessCommandLine has_any (
+        "ssh ",
+        "ssh.exe",
+        "plink",
+        "putty",
+        "scp ",
+        "sftp ",
+        "ProxyCommand",
+        "DynamicForward",
+        "LocalForward",
+        "RemoteForward",
+        " -D",
+        " -L",
+        " -R"
+   )
+| extend DetectionSource = "ProcessExecution"
+| extend SSHIndicator = case(
+    ProcessCommandLine has_any (" -D", "DynamicForward"), "SSH Dynamic Port Forwarding / SOCKS",
+    ProcessCommandLine has_any (" -L", "LocalForward"), "SSH Local Port Forwarding",
+    ProcessCommandLine has_any (" -R", "RemoteForward"), "SSH Remote Port Forwarding",
+    ProcessCommandLine has "ProxyCommand", "SSH ProxyCommand",
+    FileName in~ ("scp.exe", "sftp.exe"), "SSH File Transfer",
+    FileName in~ ("plink.exe", "putty.exe"), "Third-party SSH Client",
+    "SSH Execution"
+)
+| project
+    TimeGenerated,
+    DeviceName,
+    DeviceId,
+    AccountName,
+    InitiatingProcessAccountName,
+    DetectionSource,
+    SSHIndicator,
+    FileName,
+    ProcessCommandLine,
+    FolderPath,
+    InitiatingProcessFileName,
+    InitiatingProcessCommandLine;
+
+// === SSH network connections ===
+let SSH_Network =
+DeviceNetworkEvents
+| where TimeGenerated > ago(timeframe)
+| where RemotePort == 22
+| where ActionType in~ ("ConnectionSuccess", "Connected", "ConnectionRequest")
+| extend DetectionSource = "NetworkConnection"
+| extend SSHIndicator = "Network connection to SSH port 22"
+| project
+    TimeGenerated,
+    DeviceName,
+    DeviceId,
+    AccountName = InitiatingProcessAccountName,
+    InitiatingProcessAccountName,
+    DetectionSource,
+    SSHIndicator,
+    FileName = InitiatingProcessFileName,
+    ProcessCommandLine = InitiatingProcessCommandLine,
+    FolderPath = InitiatingProcessFolderPath,
+    InitiatingProcessFileName,
+    InitiatingProcessCommandLine,
+    RemoteIP,
+    RemoteUrl,
+    RemotePort,
+    LocalIP,
+    LocalPort,
+    Protocol,
+    ActionType;
+
+// === Unified output ===
+union isfuzzy=true SSH_Process, SSH_Network
+| summarize
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated),
+    EventCount = count(),
+    DetectionSources = make_set(DetectionSource, 10),
+    SSHIndicators = make_set(SSHIndicator, 20),
+    Files = make_set(FileName, 20),
+    CommandLines = make_set(ProcessCommandLine, 20),
+    ParentProcesses = make_set(InitiatingProcessFileName, 20),
+    ParentCommandLines = make_set(InitiatingProcessCommandLine, 20),
+    RemoteIPs = make_set(RemoteIP, 50),
+    RemoteUrls = make_set(RemoteUrl, 50),
+    RemotePorts = make_set(RemotePort, 20),
+    LocalIPs = make_set(LocalIP, 20),
+    LocalPorts = make_set(LocalPort, 20),
+    Actions = make_set(ActionType, 20)
+by DeviceName, DeviceId, AccountName, InitiatingProcessAccountName
+| extend RiskScore =
+    iff(SSHIndicators has "SSH Dynamic Port Forwarding / SOCKS", 80, 0)
+    + iff(SSHIndicators has "SSH Remote Port Forwarding", 70, 0)
+    + iff(SSHIndicators has "SSH Local Port Forwarding", 60, 0)
+    + iff(SSHIndicators has "SSH ProxyCommand", 60, 0)
+    + iff(DetectionSources has "ProcessExecution", 25, 0)
+    + iff(DetectionSources has "NetworkConnection", 25, 0)
+| extend Severity = case(
+    RiskScore >= 80, "High",
+    RiskScore >= 60, "Medium",
+    "Low"
+)
+| order by LastSeen desc
